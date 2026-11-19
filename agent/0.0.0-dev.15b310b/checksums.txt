@@ -1,0 +1,4 @@
+72a4b60ec1df0e31e2176ff6ca3c8b9a997489d27a892467e90cf9db25ed386f  palbase-agent-0.0.0-dev.15b310b-darwin-amd64.tar.gz
+99e5b95f447cedbe6fba3bcbd8dd842ad124e698bc0ce3d72f2d0f726e2d1f5d  palbase-agent-0.0.0-dev.15b310b-darwin-arm64.tar.gz
+693b017807370af98efcdc29991a449d3ff9b28212c6b2c25a5dffb5088bfe00  palbase-agent-0.0.0-dev.15b310b-linux-amd64.tar.gz
+d72e701eb3cbd89b2a9f872747b75934aa865414edee63f973c6fab7c5cb73d4  palbase-agent-0.0.0-dev.15b310b-linux-arm64.tar.gz
