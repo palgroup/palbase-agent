@@ -33,11 +33,14 @@ set -eu
 PALBASE_AI_INSTALL_BASE_URL="${PALBASE_AI_INSTALL_BASE_URL:-https://get.palbase.studio/agent}"
 PALBASE_AI_INSTALL_PREFIX="${PALBASE_AI_INSTALL_PREFIX:-$HOME/.local/bin}"
 AI_ENGINE_VERSION="${AI_ENGINE_VERSION:-latest}"
-# EK-540 / FRD-04 K8: Signed release manifest verification (Ed25519).
-# When PALBASE_AI_RELEASE_PUBKEY_PEM is set (or release-pubkey.pem is pinned),
-# checksums.txt.sig is fetched and cryptographically verified BEFORE extraction.
-PALBASE_AI_RELEASE_PUBKEY_PEM="${PALBASE_AI_RELEASE_PUBKEY_PEM:-}"
-PALBASE_AI_REQUIRE_SIGNATURE="${PALBASE_AI_REQUIRE_SIGNATURE:-1}"
+# EK-540 / FRD-04 K8: Signed release manifest verification (ECDSA P-256, compatible with macOS LibreSSL & Linux OpenSSL).
+# Trust root is pinned in-script (overridable via PALBASE_AI_RELEASE_PUBKEY_PEM for tests and key rotation);
+# verification is mandatory and never skipped.
+PINNED_RELEASE_PUBKEY_PEM='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4HGcOxKC24HOs3g3g/mL67CCESL7
+LOwy4qvKi7NVguzpjbIT5KMYEu5hKd1UwGqtCnpiFx502dLrIjkIL9tJYA==
+-----END PUBLIC KEY-----'
+PALBASE_AI_RELEASE_PUBKEY_PEM="${PALBASE_AI_RELEASE_PUBKEY_PEM:-$PINNED_RELEASE_PUBKEY_PEM}"
 
 log()  { printf 'palbase-install: %s\n' "$*" >&2; }
 die()  { printf 'palbase-install: %s\n' "$*" >&2; exit 1; }
@@ -124,14 +127,15 @@ verify_signature() {
 	sigfile="$2"
 	pubpem="$3"
 	[ -s "$sigfile" ] || die "missing or empty release signature $sigfile — refusing to install unverified binary"
+	[ -s "$pubpem" ] || die "missing or empty release public key — refusing to install unverified binary"
 	need_cmd openssl
-	# Domain-separate payload identically to packages/runner/verify.VerifyManifestSignature.
+	# Domain-separate payload identically to packages/runner/verify.VerifyManifestSignature (ECDSA P-256 SHA-256).
 	printf 'palbase-agent-release-v1\0' > "$work/signed-payload"
 	cat "$manifest" >> "$work/signed-payload"
-	openssl base64 -d -in "$sigfile" -out "$work/checksums.sig.raw" 2>/dev/null || \
+	if ! openssl base64 -d -in "$sigfile" -out "$work/checksums.sig.raw" 2>/dev/null || [ ! -s "$work/checksums.sig.raw" ]; then
 		cp "$sigfile" "$work/checksums.sig.raw"
-	openssl pkeyutl -verify -pubin -inkey "$pubpem" -rawin \
-		-in "$work/signed-payload" -sigfile "$work/checksums.sig.raw" >/dev/null 2>&1 || \
+	fi
+	openssl dgst -sha256 -verify "$pubpem" -signature "$work/checksums.sig.raw" "$work/signed-payload" >/dev/null 2>&1 || \
 		die "release signature verification FAILED for $manifest — refusing to install tampered artifact"
 }
 
@@ -154,14 +158,9 @@ main() {
 	fetch "$base/$name" "$work/$name"
 	# Separate request, separate document — see the header.
 	fetch "$base/checksums.txt" "$work/checksums.txt"
-	if [ -n "$PALBASE_AI_RELEASE_PUBKEY_PEM" ]; then
-		fetch "$base/checksums.txt.sig" "$work/checksums.txt.sig"
-		printf '%s\n' "$PALBASE_AI_RELEASE_PUBKEY_PEM" > "$work/release-pubkey.pem"
-		verify_signature "$work/checksums.txt" "$work/checksums.txt.sig" "$work/release-pubkey.pem"
-	elif [ "$PALBASE_AI_REQUIRE_SIGNATURE" = "1" ] && curl -fsSL "$PALBASE_AI_INSTALL_BASE_URL/release-pubkey.pem" -o "$work/release-pubkey.pem" 2>/dev/null; then
-		fetch "$base/checksums.txt.sig" "$work/checksums.txt.sig"
-		verify_signature "$work/checksums.txt" "$work/checksums.txt.sig" "$work/release-pubkey.pem"
-	fi
+	fetch "$base/checksums.txt.sig" "$work/checksums.txt.sig"
+	printf '%s\n' "$PALBASE_AI_RELEASE_PUBKEY_PEM" > "$work/release-pubkey.pem"
+	verify_signature "$work/checksums.txt" "$work/checksums.txt.sig" "$work/release-pubkey.pem"
 	digest="$(verify_digest "$work/$name" "$name" "$work/checksums.txt")"
 
 	tar -xzf "$work/$name" -C "$work" || die "cannot extract $name"
@@ -193,13 +192,6 @@ main() {
 	# no privilege.
 	if [ -f "$work/palbase-session-engine" ]; then
 		install_binary "$work/palbase-session-engine" "$PALBASE_AI_INSTALL_PREFIX/palbase-session-engine"
-	fi
-	# AND THE SESSION WORKER, ON THE SAME TERMS AND FOR A SHARPER REASON. The daemon mints the uid; the
-	# worker is the process that IS it. Without this member enrolment installs a daemon whose accounts
-	# are real and whose every shell command refuses — only uid 0 may become another uid, and the control
-	# plane is the operator. Placing the file is still not installing a service: enrolment does that.
-	if [ -f "$work/palbase-session-worker" ]; then
-		install_binary "$work/palbase-session-worker" "$PALBASE_AI_INSTALL_PREFIX/palbase-session-worker"
 	fi
 
 	# ‼️ SET AFTER THE CALL ABOVE, AND THAT ORDER IS LOAD-BEARING. `install_binary` assigns `dest`
