@@ -33,6 +33,11 @@ set -eu
 PALBASE_AI_INSTALL_BASE_URL="${PALBASE_AI_INSTALL_BASE_URL:-https://get.palbase.studio/agent}"
 PALBASE_AI_INSTALL_PREFIX="${PALBASE_AI_INSTALL_PREFIX:-$HOME/.local/bin}"
 AI_ENGINE_VERSION="${AI_ENGINE_VERSION:-latest}"
+# EK-540 / FRD-04 K8: Signed release manifest verification (Ed25519).
+# When PALBASE_AI_RELEASE_PUBKEY_PEM is set (or release-pubkey.pem is pinned),
+# checksums.txt.sig is fetched and cryptographically verified BEFORE extraction.
+PALBASE_AI_RELEASE_PUBKEY_PEM="${PALBASE_AI_RELEASE_PUBKEY_PEM:-}"
+PALBASE_AI_REQUIRE_SIGNATURE="${PALBASE_AI_REQUIRE_SIGNATURE:-1}"
 
 log()  { printf 'palbase-install: %s\n' "$*" >&2; }
 die()  { printf 'palbase-install: %s\n' "$*" >&2; exit 1; }
@@ -114,6 +119,22 @@ install_binary() {
 	mv -f "$tmp" "$dest" || die "cannot install $dest"
 }
 
+verify_signature() {
+	manifest="$1"
+	sigfile="$2"
+	pubpem="$3"
+	[ -s "$sigfile" ] || die "missing or empty release signature $sigfile — refusing to install unverified binary"
+	need_cmd openssl
+	# Domain-separate payload identically to packages/runner/verify.VerifyManifestSignature.
+	printf 'palbase-agent-release-v1\0' > "$work/signed-payload"
+	cat "$manifest" >> "$work/signed-payload"
+	openssl base64 -d -in "$sigfile" -out "$work/checksums.sig.raw" 2>/dev/null || \
+		cp "$sigfile" "$work/checksums.sig.raw"
+	openssl pkeyutl -verify -pubin -inkey "$pubpem" -rawin \
+		-in "$work/signed-payload" -sigfile "$work/checksums.sig.raw" >/dev/null 2>&1 || \
+		die "release signature verification FAILED for $manifest — refusing to install tampered artifact"
+}
+
 main() {
 	need_cmd curl
 	need_cmd tar
@@ -133,6 +154,14 @@ main() {
 	fetch "$base/$name" "$work/$name"
 	# Separate request, separate document — see the header.
 	fetch "$base/checksums.txt" "$work/checksums.txt"
+	if [ -n "$PALBASE_AI_RELEASE_PUBKEY_PEM" ]; then
+		fetch "$base/checksums.txt.sig" "$work/checksums.txt.sig"
+		printf '%s\n' "$PALBASE_AI_RELEASE_PUBKEY_PEM" > "$work/release-pubkey.pem"
+		verify_signature "$work/checksums.txt" "$work/checksums.txt.sig" "$work/release-pubkey.pem"
+	elif [ "$PALBASE_AI_REQUIRE_SIGNATURE" = "1" ] && curl -fsSL "$PALBASE_AI_INSTALL_BASE_URL/release-pubkey.pem" -o "$work/release-pubkey.pem" 2>/dev/null; then
+		fetch "$base/checksums.txt.sig" "$work/checksums.txt.sig"
+		verify_signature "$work/checksums.txt" "$work/checksums.txt.sig" "$work/release-pubkey.pem"
+	fi
 	digest="$(verify_digest "$work/$name" "$name" "$work/checksums.txt")"
 
 	tar -xzf "$work/$name" -C "$work" || die "cannot extract $name"
